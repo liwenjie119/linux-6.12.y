@@ -24,8 +24,6 @@
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/spinlock.h>
-#include <linux/gpio.h>
-#include <linux/of_gpio.h>
 
 #include <video/mipi_display.h>
 
@@ -73,42 +71,20 @@ void fbtft_dbg_hex(const struct device *dev, int groupsize,
 EXPORT_SYMBOL(fbtft_dbg_hex);
 
 static int fbtft_request_one_gpio(struct fbtft_par *par,
-                  const char *name, int index,
-                  struct gpio_desc **gpiop)
+				  const char *name, int index,
+				  struct gpio_desc **gpiop)
 {
-    struct device *dev = par->info->device;
-    struct device_node *node = dev->of_node;
-    int gpio, flags, ret = 0;
-    enum of_gpio_flags of_flags;
+	struct device *dev = par->info->device;
 
-    if (of_find_property(node, name, NULL)) {
-        gpio = of_get_named_gpio_flags(node, name, index, &of_flags);
-        if (gpio == -ENOENT)
-            return 0;
-        if (gpio == -EPROBE_DEFER)
-            return gpio;
-        if (gpio < 0) {
-            dev_err(dev,
-                "failed to get '%s' from DT\n", name);
-            return gpio;
-        }
-        flags = (of_flags & OF_GPIO_ACTIVE_LOW) ? GPIOF_OUT_INIT_LOW :
-                            GPIOF_OUT_INIT_HIGH;
-        ret = devm_gpio_request_one(dev, gpio, flags,
-                        dev->driver->name);
-        if (ret) {
-            dev_err(dev,
-                "gpio_request_one('%s'=%d) failed with %d\n",
-                name, gpio, ret);
-            return ret;
-        }
+	*gpiop = devm_gpiod_get_index_optional(dev, name, index,
+					       GPIOD_OUT_LOW);
+	if (IS_ERR(*gpiop))
+		return dev_err_probe(dev, PTR_ERR(*gpiop), "Failed to request %s GPIO\n", name);
 
-        *gpiop = gpio_to_desc(gpio);
-        fbtft_par_dbg(DEBUG_REQUEST_GPIOS, par, "%s: '%s' = GPIO%d\n",
-                            __func__, name, gpio);
-    }
+	fbtft_par_dbg(DEBUG_REQUEST_GPIOS, par, "%s: '%s' GPIO\n",
+		      __func__, name);
 
-    return ret;
+	return 0;
 }
 
 static int fbtft_request_gpios(struct fbtft_par *par)
@@ -116,34 +92,34 @@ static int fbtft_request_gpios(struct fbtft_par *par)
 	int i;
 	int ret;
 
-	ret = fbtft_request_one_gpio(par, "reset-gpios", 0, &par->gpio.reset);
+	ret = fbtft_request_one_gpio(par, "reset", 0, &par->gpio.reset);
 	if (ret)
 		return ret;
-	ret = fbtft_request_one_gpio(par, "dc-gpios", 0, &par->gpio.dc);
+	ret = fbtft_request_one_gpio(par, "dc", 0, &par->gpio.dc);
 	if (ret)
 		return ret;
-	ret = fbtft_request_one_gpio(par, "rd-gpios", 0, &par->gpio.rd);
+	ret = fbtft_request_one_gpio(par, "rd", 0, &par->gpio.rd);
 	if (ret)
 		return ret;
-	ret = fbtft_request_one_gpio(par, "wr-gpios", 0, &par->gpio.wr);
+	ret = fbtft_request_one_gpio(par, "wr", 0, &par->gpio.wr);
 	if (ret)
 		return ret;
-	ret = fbtft_request_one_gpio(par, "cs-gpios", 0, &par->gpio.cs);
+	ret = fbtft_request_one_gpio(par, "cs", 0, &par->gpio.cs);
 	if (ret)
 		return ret;
-	ret = fbtft_request_one_gpio(par, "latch-gpios", 0, &par->gpio.latch);
+	ret = fbtft_request_one_gpio(par, "latch", 0, &par->gpio.latch);
 	if (ret)
 		return ret;
 	for (i = 0; i < 16; i++) {
-		ret = fbtft_request_one_gpio(par, "db-gpios", i,
+		ret = fbtft_request_one_gpio(par, "db", i,
 					     &par->gpio.db[i]);
 		if (ret)
 			return ret;
-		ret = fbtft_request_one_gpio(par, "led-gpios", i,
+		ret = fbtft_request_one_gpio(par, "led", i,
 					     &par->gpio.led[i]);
 		if (ret)
 			return ret;
-		ret = fbtft_request_one_gpio(par, "aux-gpios", i,
+		ret = fbtft_request_one_gpio(par, "aux", i,
 					     &par->gpio.aux[i]);
 		if (ret)
 			return ret;
@@ -157,9 +133,8 @@ static int fbtft_backlight_update_status(struct backlight_device *bd)
 	struct fbtft_par *par = bl_get_data(bd);
 	bool polarity = par->polarity;
 
-	fbtft_par_dbg(DEBUG_BACKLIGHT, par,
-		      "%s: polarity=%d, power=%d, fb_blank=%d\n",
-		      __func__, polarity, bd->props.power, bd->props.fb_blank);
+	fbtft_par_dbg(DEBUG_BACKLIGHT, par, "%s: polarity=%d, power=%d\n", __func__,
+		      polarity, bd->props.power);
 
 	if (!backlight_is_blank(bd))
 		gpiod_set_value(par->gpio.led[0], polarity);
@@ -177,7 +152,7 @@ static int fbtft_backlight_get_brightness(struct backlight_device *bd)
 void fbtft_unregister_backlight(struct fbtft_par *par)
 {
 	if (par->info->bl_dev) {
-		par->info->bl_dev->props.power = FB_BLANK_POWERDOWN;
+		par->info->bl_dev->props.power = BACKLIGHT_POWER_OFF;
 		backlight_update_status(par->info->bl_dev);
 		backlight_device_unregister(par->info->bl_dev);
 		par->info->bl_dev = NULL;
@@ -203,7 +178,7 @@ void fbtft_register_backlight(struct fbtft_par *par)
 
 	bl_props.type = BACKLIGHT_RAW;
 	/* Assume backlight is off, get polarity from current state of pin */
-	bl_props.power = FB_BLANK_POWERDOWN;
+	bl_props.power = BACKLIGHT_POWER_OFF;
 	if (!gpiod_get_value(par->gpio.led[0]))
 		par->polarity = true;
 
@@ -239,8 +214,6 @@ static void fbtft_reset(struct fbtft_par *par)
 {
 	if (!par->gpio.reset)
 		return;
-
-	fbtft_par_dbg(DEBUG_RESET, par, "%s()\n", __func__);
 
 	gpiod_set_value_cansleep(par->gpio.reset, 1);
 	usleep_range(20, 40);
@@ -351,7 +324,6 @@ static void fbtft_deferred_io(struct fb_info *info, struct list_head *pagereflis
 	unsigned int dirty_lines_start, dirty_lines_end;
 	struct fb_deferred_io_pageref *pageref;
 	unsigned int y_low = 0, y_high = 0;
-	int count = 0;
 
 	spin_lock(&par->dirty_lock);
 	dirty_lines_start = par->dirty_lines_start;
@@ -363,7 +335,6 @@ static void fbtft_deferred_io(struct fb_info *info, struct list_head *pagereflis
 
 	/* Mark display lines as dirty */
 	list_for_each_entry(pageref, pagereflist, list) {
-		count++;
 		y_low = pageref->offset / info->fix.line_length;
 		y_high = (pageref->offset + PAGE_SIZE - 1) / info->fix.line_length;
 		dev_dbg(info->device,
@@ -379,61 +350,6 @@ static void fbtft_deferred_io(struct fb_info *info, struct list_head *pagereflis
 
 	par->fbtftops.update_display(info->par,
 					dirty_lines_start, dirty_lines_end);
-}
-
-static void fbtft_fb_fillrect(struct fb_info *info,
-			      const struct fb_fillrect *rect)
-{
-	struct fbtft_par *par = info->par;
-
-	dev_dbg(info->dev,
-		"%s: dx=%d, dy=%d, width=%d, height=%d\n",
-		__func__, rect->dx, rect->dy, rect->width, rect->height);
-	sys_fillrect(info, rect);
-
-	par->fbtftops.mkdirty(info, rect->dy, rect->height);
-}
-
-static void fbtft_fb_copyarea(struct fb_info *info,
-			      const struct fb_copyarea *area)
-{
-	struct fbtft_par *par = info->par;
-
-	dev_dbg(info->dev,
-		"%s: dx=%d, dy=%d, width=%d, height=%d\n",
-		__func__,  area->dx, area->dy, area->width, area->height);
-	sys_copyarea(info, area);
-
-	par->fbtftops.mkdirty(info, area->dy, area->height);
-}
-
-static void fbtft_fb_imageblit(struct fb_info *info,
-			       const struct fb_image *image)
-{
-	struct fbtft_par *par = info->par;
-
-	dev_dbg(info->dev,
-		"%s: dx=%d, dy=%d, width=%d, height=%d\n",
-		__func__,  image->dx, image->dy, image->width, image->height);
-	sys_imageblit(info, image);
-
-	par->fbtftops.mkdirty(info, image->dy, image->height);
-}
-
-static ssize_t fbtft_fb_write(struct fb_info *info, const char __user *buf,
-			      size_t count, loff_t *ppos)
-{
-	struct fbtft_par *par = info->par;
-	ssize_t res;
-
-	dev_dbg(info->dev,
-		"%s: count=%zd, ppos=%llu\n", __func__,  count, *ppos);
-	res = fb_sys_write(info, buf, count, ppos);
-
-	/* TODO: only mark changed area update all for now */
-	par->fbtftops.mkdirty(info, -1, 0);
-
-	return res;
 }
 
 /* from pxafb.c */
@@ -497,6 +413,32 @@ static int fbtft_fb_blank(int blank, struct fb_info *info)
 	return ret;
 }
 
+static void fbtft_ops_damage_range(struct fb_info *info, off_t off, size_t len)
+{
+	struct fbtft_par *par = info->par;
+
+	/* TODO: only mark changed area update all for now */
+	par->fbtftops.mkdirty(info, -1, 0);
+}
+
+static void fbtft_ops_damage_area(struct fb_info *info, u32 x, u32 y, u32 width, u32 height)
+{
+	struct fbtft_par *par = info->par;
+
+	par->fbtftops.mkdirty(info, y, height);
+}
+
+FB_GEN_DEFAULT_DEFERRED_SYSMEM_OPS(fbtft_ops,
+				   fbtft_ops_damage_range,
+				   fbtft_ops_damage_area)
+
+static const struct fb_ops fbtft_ops = {
+	.owner        = THIS_MODULE,
+	FB_DEFAULT_DEFERRED_OPS(fbtft_ops),
+	.fb_setcolreg = fbtft_fb_setcolreg,
+	.fb_blank     = fbtft_fb_blank,
+};
+
 static void fbtft_merge_fbtftops(struct fbtft_ops *dst, struct fbtft_ops *src)
 {
 	if (src->write)
@@ -545,7 +487,6 @@ static void fbtft_merge_fbtftops(struct fbtft_ops *dst, struct fbtft_ops *src)
  * Creates a new frame buffer info structure.
  *
  * Also creates and populates the following structures:
- *   info->fbops
  *   info->fbdefio
  *   info->pseudo_palette
  *   par->fbtftops
@@ -560,7 +501,6 @@ struct fb_info *fbtft_framebuffer_alloc(struct fbtft_display *display,
 {
 	struct fb_info *info;
 	struct fbtft_par *par;
-	struct fb_ops *fbops = NULL;
 	struct fb_deferred_io *fbdefio = NULL;
 	u8 *vmem = NULL;
 	void *txbuf = NULL;
@@ -635,10 +575,6 @@ struct fb_info *fbtft_framebuffer_alloc(struct fbtft_display *display,
 	if (!vmem)
 		goto alloc_fail;
 
-	fbops = devm_kzalloc(dev, sizeof(struct fb_ops), GFP_KERNEL);
-	if (!fbops)
-		goto alloc_fail;
-
 	fbdefio = devm_kzalloc(dev, sizeof(struct fb_deferred_io), GFP_KERNEL);
 	if (!fbdefio)
 		goto alloc_fail;
@@ -662,18 +598,8 @@ struct fb_info *fbtft_framebuffer_alloc(struct fbtft_display *display,
 		goto alloc_fail;
 
 	info->screen_buffer = vmem;
-	info->fbops = fbops;
+	info->fbops = &fbtft_ops;
 	info->fbdefio = fbdefio;
-
-	fbops->owner        =      dev->driver->owner;
-	fbops->fb_read      =      fb_sys_read;
-	fbops->fb_write     =      fbtft_fb_write;
-	fbops->fb_fillrect  =      fbtft_fb_fillrect;
-	fbops->fb_copyarea  =      fbtft_fb_copyarea;
-	fbops->fb_imageblit =      fbtft_fb_imageblit;
-	fbops->fb_setcolreg =      fbtft_fb_setcolreg;
-	fbops->fb_blank     =      fbtft_fb_blank;
-	fbops->fb_mmap      =      fb_deferred_io_mmap;
 
 	fbdefio->delay =            HZ / fps;
 	fbdefio->sort_pagereflist = true;
@@ -708,7 +634,7 @@ struct fb_info *fbtft_framebuffer_alloc(struct fbtft_display *display,
 	info->var.transp.offset =  0;
 	info->var.transp.length =  0;
 
-	info->flags =              FBINFO_FLAG_DEFAULT | FBINFO_VIRTFB;
+	info->flags =              FBINFO_VIRTFB;
 
 	par = info->par;
 	par->info = info;
@@ -863,8 +789,8 @@ int fbtft_register_framebuffer(struct fb_info *fb_info)
 	if (par->txbuf.buf && par->txbuf.len >= 1024)
 		sprintf(text1, ", %zu KiB buffer memory", par->txbuf.len >> 10);
 	if (spi)
-		sprintf(text2, ", spi%d.%d at %d MHz", spi->master->bus_num,
-			spi->chip_select, spi->max_speed_hz / 1000000);
+		sprintf(text2, ", spi%d.%d at %d MHz", spi->controller->bus_num,
+			spi_get_chipselect(spi, 0), spi->max_speed_hz / 1000000);
 	dev_info(fb_info->dev,
 		 "%s frame buffer, %dx%d, %d KiB video memory%s, fps=%lu%s\n",
 		 fb_info->fix.id, fb_info->var.xres, fb_info->var.yres,
@@ -873,7 +799,7 @@ int fbtft_register_framebuffer(struct fb_info *fb_info)
 
 	/* Turn on backlight if available */
 	if (fb_info->bl_dev) {
-		fb_info->bl_dev->props.power = FB_BLANK_UNBLANK;
+		fb_info->bl_dev->props.power = BACKLIGHT_POWER_ON;
 		fb_info->bl_dev->ops->update_status(fb_info->bl_dev);
 	}
 
@@ -1124,8 +1050,6 @@ static int fbtft_verify_gpios(struct fbtft_par *par)
 	struct fbtft_platform_data *pdata = par->pdata;
 	int i;
 
-	fbtft_par_dbg(DEBUG_VERIFY_GPIOS, par, "%s()\n", __func__);
-
 	if (pdata->display.buswidth != 9 &&  par->startbyte == 0 &&
 	    !par->gpio.dc) {
 		dev_err(par->info->device,
@@ -1229,9 +1153,6 @@ int fbtft_probe_common(struct fbtft_display *display,
 	else
 		dev = &pdev->dev;
 
-	if (unlikely(display->debug & DEBUG_DRIVER_INIT_FUNCTIONS))
-		dev_info(dev, "%s()\n", __func__);
-
 	pdata = dev->platform_data;
 	if (!pdata) {
 		pdata = fbtft_properties_read(dev);
@@ -1284,7 +1205,7 @@ int fbtft_probe_common(struct fbtft_display *display,
 
 	/* 9-bit SPI setup */
 	if (par->spi && display->buswidth == 9) {
-		if (par->spi->master->bits_per_word_mask & SPI_BPW_MASK(9)) {
+		if (par->spi->controller->bits_per_word_mask & SPI_BPW_MASK(9)) {
 			par->spi->bits_per_word = 9;
 		} else {
 			dev_warn(&par->spi->dev,
@@ -1348,4 +1269,5 @@ void fbtft_remove_common(struct device *dev, struct fb_info *info)
 }
 EXPORT_SYMBOL(fbtft_remove_common);
 
+MODULE_DESCRIPTION("Core FB support for small TFT LCD display modules");
 MODULE_LICENSE("GPL");
